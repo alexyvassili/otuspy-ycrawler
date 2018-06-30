@@ -67,23 +67,8 @@ def clean_filename(filename):
     filename = re.sub(r"\s+", '-', filename)
     filename = filename.replace('__', '_')
     return filename[:FILENAME_LIMIT]
-# def __init__(self):
-#     self.fetch_counter = 0
-#
-#
-# async def fetch(self, session, url):
-#     """Fetch a URL using aiohttp returning parsed JSON response.
-#     As suggested by the aiohttp docs we reuse the session.
-#     """
-#     with async_timeout.timeout(FETCH_TIMEOUT):
-#         self.fetch_counter += 1
-#         if self.fetch_counter > MAXIMUM_FETCHES:
-#             raise BoomException('BOOM!')
-#         elif randint(0, 3) == 0:
-#             raise Exception('Random generic exception')
-#
-#         async with session.get(url) as response:
-#             return await response.json()
+
+
 def parse_main_page(html: str) -> list:
     """ return list of
         (post_url, post_title, comments_on_post_url)
@@ -132,21 +117,19 @@ async def get_one_page(url: str) -> str:
         return html
     retry = MAXIMUM_FETCHES
     while retry:
+        retry -= 1
         try:
             with async_timeout.timeout(FETCH_TIMEOUT):
                 async with aiohttp.ClientSession() as session:
                         html = await fetch(session, url)
         except aiohttp.client_exceptions.ClientConnectorError:
-            logging.warning(f'Connection Error with {url}')
-            retry -=1
+            logging.warning(f'RETRIES: {retry}. Connection Error with {url}')
             continue
         except asyncio.TimeoutError:
-            logging.warning(f'Timeout Error with {url}')
-            retry -= 1
+            logging.warning(f'RETRIES: {retry}. Timeout Error with {url}')
             continue
         except aiohttp.client_exceptions.ServerDisconnectedError:
-            logging.warning(f'Server Disconnected Error with {url}')
-            retry -= 1
+            logging.warning(f'RETRIES: {retry}. Server Disconnected Error with {url}')
             continue
         else:
             break
@@ -222,29 +205,37 @@ async def parse_one(post: Post):
         return
 
 
-async def parse_all(ioloop):
+async def parse_all(queue):
+    logging.info('PARSE ALL: Get new urls')
+    posts = await check_for_new_posts()
+    if not posts:
+        logging.info('PARSE ALL: no urls')
+    else:
+        logging.info('PARSE ALL: starting parse_one on urls: {}'.format(len(posts)))
+        tasks = [asyncio.ensure_future(parse_one(post)) for post in posts]
+        await asyncio.wait(tasks)
+        logging.info('ending parse urls')
+
+
+async def run_forever(queue):
     while True:
-        logging.info('PARSE ALL: Get new urls')
-        posts = await check_for_new_posts()
-        if not posts:
-            logging.info('PARSE ALL: no urls')
-            await asyncio.sleep(CHECK_NEW_TIMEOUT)
-        else:
-            logging.info('PARSE ALL: starting parse_one on urls: {}'.format(len(posts)))
-            tasks = [asyncio.ensure_future(parse_one(post)) for post in posts]
-            await asyncio.wait(tasks)
-            logging.info('ending parse urls')
+        logging.info("HEARTBEAT")
+        asyncio.ensure_future(parse_all(queue))
+        queue.join()
+        await asyncio.sleep(CHECK_NEW_TIMEOUT)
 
 
 if __name__ == '__main__':
     logging.basicConfig(format=LOGGING_FORMAT, datefmt='%Y.%m.%d %H:%M:%S', level=LOGGING_LEVEL)
     os.makedirs(ROOT_FOLDER, exist_ok=True)
     ioloop = asyncio.get_event_loop()
-    ioloop = asyncio.get_event_loop()
+    queue = asyncio.Queue()
     try:
         logging.info('run parse all coro')
-        task = ioloop.create_task(parse_all(ioloop))
-        ioloop.run_until_complete(task)
+        # task = ioloop.create_task(parse_all(ioloop))
+        # ioloop.run_until_complete(task)
+        ioloop.create_task(run_forever(queue))
+        ioloop.run_forever()
         logging.info('exit from async coroutines')
     except KeyboardInterrupt:
         logging.info('KeyboardInterrupt, exiting')
