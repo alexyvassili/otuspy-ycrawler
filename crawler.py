@@ -2,17 +2,15 @@ import asyncio
 import aiohttp
 import re
 import os
-import requests
 import logging
 import async_timeout
 
-from time import sleep
 from bs4 import BeautifulSoup
 
 LOGGING_FORMAT = '[%(asctime)s] %(levelname).1s %(message)s'
 LOGGING_LEVEL = logging.INFO
 
-CHECK_NEW_TIMEOUT = 5
+CHECK_NEW_TIMEOUT = 60
 INIT_URL = 'https://news.ycombinator.com/'
 FILENAME_LIMIT = 80
 ROOT_FOLDER = 'hasker_news'
@@ -115,24 +113,16 @@ async def get_one_page(url: str) -> str:
     html = ''
     if is_url_ignored(url):
         return html
-    retry = MAXIMUM_FETCHES
-    while retry:
-        retry -= 1
-        try:
-            with async_timeout.timeout(FETCH_TIMEOUT):
-                async with aiohttp.ClientSession() as session:
-                        html = await fetch(session, url)
-        except aiohttp.client_exceptions.ClientConnectorError:
-            logging.warning(f'RETRIES: {retry}. Connection Error with {url}')
-            continue
-        except asyncio.TimeoutError:
-            logging.warning(f'RETRIES: {retry}. Timeout Error with {url}')
-            continue
-        except aiohttp.client_exceptions.ServerDisconnectedError:
-            logging.warning(f'RETRIES: {retry}. Server Disconnected Error with {url}')
-            continue
-        else:
-            break
+    try:
+        with async_timeout.timeout(FETCH_TIMEOUT):
+            async with aiohttp.ClientSession() as session:
+                    html = await fetch(session, url)
+    except aiohttp.client_exceptions.ClientConnectorError:
+        logging.warning(f'Connection Error with {url}')
+    except asyncio.TimeoutError:
+        logging.warning(f'Timeout Error with {url}')
+    except aiohttp.client_exceptions.ServerDisconnectedError:
+        logging.warning(f'Server Disconnected Error with {url}')
     return html
 
 
@@ -219,8 +209,8 @@ async def parse_all(queue):
 
 async def run_forever(queue):
     while True:
-        logging.info("HEARTBEAT")
-        asyncio.ensure_future(parse_all(queue))
+        tasks = [asyncio.ensure_future(parse_all(queue))]
+        await asyncio.wait(tasks)
         queue.join()
         await asyncio.sleep(CHECK_NEW_TIMEOUT)
 
