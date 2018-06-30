@@ -4,6 +4,7 @@ import re
 import os
 import requests
 import logging
+import async_timeout
 
 from time import sleep
 from bs4 import BeautifulSoup
@@ -11,11 +12,14 @@ from bs4 import BeautifulSoup
 LOGGING_FORMAT = '[%(asctime)s] %(levelname).1s %(message)s'
 LOGGING_LEVEL = logging.INFO
 
-TIMEOUT = 5
+CHECK_NEW_TIMEOUT = 5
 INIT_URL = 'https://news.ycombinator.com/'
 FILENAME_LIMIT = 80
 ROOT_FOLDER = 'hasker_news'
 IGNORE = ['.pdf', '.jpg']
+
+FETCH_TIMEOUT = 10
+MAXIMUM_FETCHES = 5
 
 headers = {
         # 'Host': '',
@@ -27,118 +31,76 @@ headers = {
     }
 
 
-def check_folder(folder):
-    if not os.path.exists(folder):
-        os.makedirs(folder)
+class Post:
+    def __init__(self, post_url, post_title, comments_url):
+        self.url = post_url
+        self.title = post_title
+        self.comments = comments_url
+        self.filename = self.get_filename()
+        self.folder = os.path.join(ROOT_FOLDER, self.filename)
+        self.html = ''
+
+    def get_filename(self):
+        uid = self.comments.split('=')[1]
+        title = re.sub(r"[^\w\s]", '_', self.title)
+        filename = re.sub(r"\s+", '-', title)
+        filename = filename.replace('__', '_')
+        return uid + '_' + filename[:FILENAME_LIMIT]
+
+    def is_downloaded(self):
+        return os.path.exists(self.folder)
+
+    async def load(self):
+        self.html = await get_one_page(self.url)
+
+    def save(self):
+        os.makedirs(self.folder, exist_ok=True)
+        filename = self.filename + '.html'
+        full_filename = os.path.join(self.folder, filename)
+        with open(full_filename, 'w') as f:
+            f.write(self.html)
+        logging.info(f'SAVED: {full_filename}')
 
 
-def get_first_page(url: str) -> str:
-    session = requests.Session()
-    s = session.get(INIT_URL, headers=headers)
-    return s.text
-
-
-def get_top_urls_from_first_page(html: str) -> list:
-    urls_and_titles = []
+def clean_filename(filename):
+    filename = re.sub(r"[^\w\s]", '_', filename)
+    filename = re.sub(r"\s+", '-', filename)
+    filename = filename.replace('__', '_')
+    return filename[:FILENAME_LIMIT]
+# def __init__(self):
+#     self.fetch_counter = 0
+#
+#
+# async def fetch(self, session, url):
+#     """Fetch a URL using aiohttp returning parsed JSON response.
+#     As suggested by the aiohttp docs we reuse the session.
+#     """
+#     with async_timeout.timeout(FETCH_TIMEOUT):
+#         self.fetch_counter += 1
+#         if self.fetch_counter > MAXIMUM_FETCHES:
+#             raise BoomException('BOOM!')
+#         elif randint(0, 3) == 0:
+#             raise Exception('Random generic exception')
+#
+#         async with session.get(url) as response:
+#             return await response.json()
+def parse_main_page(html: str) -> list:
+    """ return list of
+        (post_url, post_title, comments_on_post_url)
+    """
+    top_posts = []
     bsObj = BeautifulSoup(html, "html.parser")
     top_news = bsObj.find_all("a", attrs={"class": "storylink"})
     comment_urls = bsObj.find_all("td", attrs={"class": "subtext"})
     comment_urls = [INIT_URL + comment.find_all("a")[-1]["href"] for comment in comment_urls]
     if len(top_news) != len(comment_urls):
         raise ValueError('Len top news list and len comments list is not equal')
-    for n, url in zip(top_news, comment_urls):
-        urls_and_titles.append( (n['href'], n.text, url))
-    return urls_and_titles
-
-
-async def get_all_urls_from_comment_page(comment_url: str) -> list:
-    urls=[]
-    html = await aget_one_page(comment_url)
-    bsObj = BeautifulSoup(html, "html.parser")
-    comments_raw = bsObj.find_all("span", attrs={"class": "c00"})
-    for comment in comments_raw:
-        if not comment.a:
-            continue
-        href = comment.a["href"]
-        # this if because we has broken html and no span closed tag
-        # and reply links adds to comments_raw
-        if 'reply' in href:
-            continue
-        urls.append(href)
-    return urls
-
-
-def get_file_name_from_title(title: str) -> str:
-    title = re.sub(r"[^\w\s]", '_', title)
-    filename = re.sub(r"\s+", '-', title)
-    filename = filename.replace('__', '_')
-    return filename[:FILENAME_LIMIT]
-
-
-def save_page(html: str, filename: str, folder=''):
-    filename = filename + '.html'
-    if folder:
-        filename = os.path.join(folder, filename)
-    else:
-        filename = os.path.join(ROOT_FOLDER, filename)
-    with open(filename, 'w') as f:
-        f.write(html)
-    logging.info(f'SAVED: {filename}')
-
-
-async def fetch(session, url):
-    async with session.get(url) as response:
-        try:
-            return await response.text()
-        except UnicodeDecodeError:
-            logging.info(f'ERROR: UnicodeDecodeError in {url}')
-            return ''
-
-
-async def aget_one_page(url: str) -> str:
-    if is_url_ignored(url):
-        return ''
-    async with aiohttp.ClientSession() as session:
-        html = await fetch(session, url)
-    return html
-
-
-def get_title(html):
-    bsObj = BeautifulSoup(html, "html.parser")
-    title = bsObj.title.text if bsObj.title else None
-    return title
-
-
-async def parse_one(url: str, title, comment_url):
-    prefix = f'Coro: {url}: PARSE_ONE '
-    logging.info(f'{prefix}')
-    html = await aget_one_page(url)
-    if not html:
-        return
-    get_title(html)
-    filename = get_file_name_from_title(title)
-
-    sub_folder = os.path.join(ROOT_FOLDER, filename)
-    check_folder(sub_folder)
-    save_page(html, filename, folder=sub_folder)
-    urls_from_comment_page = await get_all_urls_from_comment_page(comment_url)
-
-    for sub_url in urls_from_comment_page:
-        sub_html = await aget_one_page(sub_url)
-        if not sub_html:
-            continue
-        sub_title = get_title(sub_html)
-        if not sub_title:
-            continue
-        sub_filename = get_file_name_from_title(sub_title)
-        save_page(sub_html, sub_filename, folder=sub_folder)
-
-
-async def parse_top_urls(top_urls_and_titles: list):
-    tasks = [asyncio.ensure_future(parse_one(url, title, comment_url)) for url, title, comment_url in top_urls_and_titles]
-    logging.info('Creating tasks. Await')
-    await asyncio.wait(tasks)
-    logging.info('Parse Done')
+    for post, comment_url in zip(top_news, comment_urls):
+        post_url = post['href']
+        if post_url.startswith('item'):
+            post_url = INIT_URL + post_url
+        top_posts.append((post_url, post.text, comment_url))
+    return top_posts
 
 
 def is_url_ignored(url):
@@ -155,37 +117,135 @@ def is_url_valid(url:str):
         return False
 
 
-def check_top_urls(urls: list):
-    filtered_urls = []
-    for item in urls:
-        url = item[0]
-        title = item[1]
-        if is_url_ignored(url) or not is_url_valid(url):
-            continue
-        folder = get_file_name_from_title(title)
-        folder = os.path.join(ROOT_FOLDER, folder)
-        if os.path.exists(folder):
-            continue
-        filtered_urls.append(item)
-    return filtered_urls
+async def fetch(session, url):
+    async with session.get(url) as response:
+        try:
+            return await response.text()
+        except UnicodeDecodeError:
+            logging.info(f'ERROR: UnicodeDecodeError in {url}')
+            return ''
 
 
-if __name__ == "__main__":
+async def get_one_page(url: str) -> str:
+    html = ''
+    if is_url_ignored(url):
+        return html
+    retry = MAXIMUM_FETCHES
+    while retry:
+        try:
+            with async_timeout.timeout(FETCH_TIMEOUT):
+                async with aiohttp.ClientSession() as session:
+                        html = await fetch(session, url)
+        except aiohttp.client_exceptions.ClientConnectorError:
+            logging.warning(f'Connection Error with {url}')
+            retry -=1
+            continue
+        except asyncio.TimeoutError:
+            logging.warning(f'Timeout Error with {url}')
+            retry -= 1
+            continue
+        except aiohttp.client_exceptions.ServerDisconnectedError:
+            logging.warning(f'Server Disconnected Error with {url}')
+            retry -= 1
+            continue
+        else:
+            break
+    return html
+
+
+async def check_for_new_posts():
+    main_page_html = await get_one_page(INIT_URL)
+    top_posts_data = parse_main_page(main_page_html)
+    top_posts = [Post(*post_data) for post_data in top_posts_data]
+    posts_to_parse = [post for post in top_posts
+                      if not post.is_downloaded() and is_url_valid(post.url)]
+    return posts_to_parse
+
+
+async def get_all_urls_from_comment_page(comment_url: str) -> list:
+    urls=[]
+    html = await get_one_page(comment_url)
+    bsObj = BeautifulSoup(html, "html.parser")
+    comments_raw = bsObj.find_all("span", attrs={"class": "c00"})
+    for comment in comments_raw:
+        if not comment.a:
+            continue
+        href = comment.a["href"]
+        # this if because we has broken html and no span closed tag
+        # and reply links adds to comments_raw
+        if 'reply' in href:
+            continue
+        urls.append(href)
+    return urls
+
+
+def get_title(html):
+    bsObj = BeautifulSoup(html, "html.parser")
+    title = bsObj.title.text if bsObj.title else None
+    return title
+
+
+def save_page(html: str, filename: str, folder):
+    filename = filename + '.html'
+    filename = os.path.join(folder, filename)
+    with open(filename, 'w') as f:
+        f.write(html)
+    logging.info(f'SAVED: {filename}')
+
+
+async def load_url_from_comment(url, folder):
+    logging.info('TASK LOAD URL FROM COMMENT {}'.format(url))
+    html = await get_one_page(url)
+    if not html:
+        return
+    title = get_title(html)
+    if not title:
+        return
+    sub_filename = clean_filename(title)
+    save_page(html, sub_filename, folder=folder)
+
+
+async def parse_one(post: Post):
+    logging.info(f'Coro: {post.url}: PARSE_ONE ')
+    await post.load()
+    logging.info(f'Coro: {post.url}: LOADED ')
+    post.save()
+    logging.info(f'Coro: {post.url}: SAVED ')
+
+    urls_from_comment_page = await get_all_urls_from_comment_page(post.comments)
+    logging.info(f'Coro: {post.url}: COMMENT URLS {len(urls_from_comment_page)}')
+    tasks = [asyncio.ensure_future(load_url_from_comment(url, post.folder))
+             for url in urls_from_comment_page]
+    try:
+        await asyncio.wait(tasks)
+    except ValueError:
+        return
+
+
+async def parse_all(ioloop):
+    while True:
+        logging.info('PARSE ALL: Get new urls')
+        posts = await check_for_new_posts()
+        if not posts:
+            logging.info('PARSE ALL: no urls')
+            await asyncio.sleep(CHECK_NEW_TIMEOUT)
+        else:
+            logging.info('PARSE ALL: starting parse_one on urls: {}'.format(len(posts)))
+            tasks = [asyncio.ensure_future(parse_one(post)) for post in posts]
+            await asyncio.wait(tasks)
+            logging.info('ending parse urls')
+
+
+if __name__ == '__main__':
     logging.basicConfig(format=LOGGING_FORMAT, datefmt='%Y.%m.%d %H:%M:%S', level=LOGGING_LEVEL)
-    check_folder(ROOT_FOLDER)
+    os.makedirs(ROOT_FOLDER, exist_ok=True)
+    ioloop = asyncio.get_event_loop()
     ioloop = asyncio.get_event_loop()
     try:
-        while True:
-            first_page_html = get_first_page(INIT_URL)
-            top_urls_and_titles = get_top_urls_from_first_page(first_page_html)
-            urls_to_parse = check_top_urls(top_urls_and_titles)
-            if not urls_to_parse:
-                logging.info('No new links, timeout')
-                sleep(TIMEOUT)
-                continue
-            logging.info('run async coroutines')
-            ioloop.run_until_complete(parse_top_urls(urls_to_parse))
-            logging.info('exit from async coroutines')
+        logging.info('run parse all coro')
+        task = ioloop.create_task(parse_all(ioloop))
+        ioloop.run_until_complete(task)
+        logging.info('exit from async coroutines')
     except KeyboardInterrupt:
         logging.info('KeyboardInterrupt, exiting')
     except Exception as e:
