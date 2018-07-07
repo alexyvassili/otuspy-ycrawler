@@ -54,6 +54,8 @@ class Page:
             logging.warning(f'Timeout Error with {self.url}')
         except aiohttp.client_exceptions.ServerDisconnectedError:
             logging.warning(f'Server Disconnected Error with {self.url}')
+        except aiohttp.client_exceptions.TooManyRedirects:
+            logging.warning(f'Too many redirects on {self.url}')
         return html
 
     async def load(self):
