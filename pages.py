@@ -32,7 +32,7 @@ class Page:
         else:
             return False
 
-    async def fetch(self, session):
+    async def simple_fetch(self, session):
         async with session.get(self.url) as response:
             try:
                 return await response.text()
@@ -59,7 +59,7 @@ class Page:
     async def load(self):
         self.html = await self.get()
 
-    async def fetch_w_chunks(self, session):
+    async def fetch(self, session):
         f = io.BytesIO()
         try:
             async with session.get(self.url) as response:
